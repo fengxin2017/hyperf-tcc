@@ -28,7 +28,7 @@ class InjectService
      */
     public function __construct(Transaction $transation, string $serviceInterface)
     {
-        $this->transation       = $transation;
+        $this->transation = $transation;
         $this->serviceInterface = $serviceInterface;
     }
 
@@ -51,17 +51,26 @@ class InjectService
      */
     public function __call(string $method, array $params)
     {
-        $service = ApplicationContext::getContainer()
-                                     ->get($this->serviceInterface);
+        $result = call_user_func_array([$this->rpcServiceClient(), $method], $params);
 
-        $result = call_user_func_array([$service, $method], $params);
+        if (rpc_context_get(Transaction::TRANSACTION_TYPE) == Transaction::TRANSACTION_TYPE_TRY) {
+            $this->transation->addTryedService(
+                $this->serviceInterface,
+                $method,
+                $params,
+                );
+        }
 
-        $this->transation->addTryedService(
-            $this->serviceInterface,
-            $method,
-            $params
-        );
 
         return $result;
+    }
+
+    /**
+     * @return mixed|string
+     */
+    protected function rpcServiceClient()
+    {
+        return ApplicationContext::getContainer()
+            ->get($this->serviceInterface);
     }
 }

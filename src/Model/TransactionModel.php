@@ -12,4 +12,6 @@ class TransactionModel extends Model
      * @var string
      */
     protected $table = '__transaction__';
+
+    protected $guarded = [];
 }

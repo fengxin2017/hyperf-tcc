@@ -12,19 +12,22 @@ class CreateTransactionTable extends Migration
             '__transaction__',
             function (Blueprint $table) {
                 $table->string('transaction_id')
-                      ->comment('事务ID');
+                    ->comment('事务ID');
                 $table->string('transaction_type')
-                      ->comment('事务类型');
+                    ->comment('事务类型');
                 $table->string('service_class')
-                      ->comment('服务类名');
+                    ->comment('服务类名');
                 $table->string('service_func')
-                      ->comment('服务方法名');
+                    ->comment('服务方法名');
                 $table->text('service_params')
-                      ->comment('服务参数');
+                    ->comment('服务参数');
                 $table->text('service_result')
-                      ->comment('服务返回结果');
+                    ->comment('服务返回结果')
+                    ->nullable();
                 $table->tinyInteger('status')
-                      ->comment('事务状态0待执行1失败2成功');
+                    ->comment('事务状态0待执行1失败2成功');
+                $table->string('service_req')
+                    ->comment('事物请求号');
                 $table->timestamps();
             }
         );

@@ -4,10 +4,7 @@
 namespace Fengxin2017\Tcc;
 
 
-use Fengxin2017\Tcc\Exception\TransactionCancelException;
-use Fengxin2017\Tcc\Exception\TransactionCommitException;
 use Fengxin2017\Tcc\Exception\TransactionMethodException;
-use Fengxin2017\Tcc\Exception\TransactionTypeException;
 use Fengxin2017\Tcc\Model\TransactionModel;
 use Hyperf\DbConnection\Db;
 use Hyperf\Utils\Arr;
@@ -45,6 +42,21 @@ class Transaction
     protected $connections = [];
 
     /**
+     * @var int $serviceIndex
+     */
+    protected $serviceIndex = 0;
+
+    /**
+     * @var string $transactionParentReq
+     */
+    protected $transactionParentReq = '';
+
+    /**
+     * @var $transactionReq
+     */
+    protected $transactionReq;
+
+    /**
      * local transaction number
      * @var int
      */
@@ -57,22 +69,22 @@ class Transaction
     protected $transactionId;
 
 
-    const TRANSACTION_OBJECT     = '_TRANSACTION_OBJECT_';//事务对象在协程上下文的KEY
-    const TRANSACTION_TYPE       = '_TRANSACTION_TYPE_';//事务类型在RPC上下文的KEY
-    const TRANSACTION_REQ        = '_TRANSACTION_REQ_';//事务服务请求号在RPC上下文的KEY
-    const TRANSACTION_ID         = '_TRANSACTION_ID_';//事务ID在RPC上下文的KEY,整个链路使用同一个ID
-    const TRANSACTION_LOCAL_REQ  = '_TRANSACTION_LOCAL_REQ_';
+    const TRANSACTION_OBJECT = '_TRANSACTION_OBJECT_';//事务对象在协程上下文的KEY
+    const TRANSACTION_TYPE = '_TRANSACTION_TYPE_';//事务类型在RPC上下文的KEY
+    const TRANSACTION_REQ = '_TRANSACTION_REQ_';//事务服务请求号在RPC上下文的KEY
+    const TRANSACTION_ID = '_TRANSACTION_ID_';//事务ID在RPC上下文的KEY,整个链路使用同一个ID
+    const TRANSACTION_LOCAL_REQ = '_TRANSACTION_LOCAL_REQ_';
     const TRANSACTION_FIRST_NODE = '_TRANSACTION_FIRST_NODE_';
     const TRANSACTION_PARENT_REQ = '_TRANSACTION_PARENT_REQ_';
 
     //TCC类型
-    const TRANSACTION_TYPE_TRY     = 'Try';//尝试
+    const TRANSACTION_TYPE_TRY = 'Try';//尝试
     const TRANSACTION_TYPE_CONFIRM = 'Confirm';//确认
-    const TRANSACTION_TYPE_CANCEL  = 'Cancel';//取消
+    const TRANSACTION_TYPE_CANCEL = 'Cancel';//取消
 
     //服务事务执行状态
-    const SERVICE_TRANSACTION_STATUS_WAIT    = 0;//未执行
-    const SERVICE_TRANSACTION_STATUS_FAIL    = 1;//执行失败
+    const SERVICE_TRANSACTION_STATUS_WAIT = 0;//未执行
+    const SERVICE_TRANSACTION_STATUS_FAIL = 1;//执行失败
     const SERVICE_TRANSACTION_STATUS_SUCCESS = 2;//执行成功
 
     //服务重试最大次数
@@ -88,25 +100,22 @@ class Transaction
     public function transaction(callable $callable)
     {
         try {
-            foreach ($this->getConnections() as $connection) {
-                Db::connection($connection)
-                  ->beginTransaction();
-            }
-
             $result = $callable($this);
 
+            // 如果是头节点先确认Try过的服务
+            if ($this->isFirstNode()) {
+                $this->comfirmOrCancel(Transaction::TRANSACTION_TYPE_CONFIRM);
+            }
+
             foreach ($this->getConnections() as $connection) {
                 Db::connection($connection)
-                  ->commit();
+                    ->commit();
             }
 
             return $result;
         } catch (Throwable $throwable) {
-            foreach ($this->getConnections() as $connection) {
-                Db::connection($connection)
-                  ->rollBack();
-            }
-
+            // 本地事务Try期间发生的异常回滚
+            $this->comfirmOrCancel(Transaction::TRANSACTION_TYPE_CANCEL);
             throw $throwable;
         }
     }
@@ -117,63 +126,50 @@ class Transaction
      * @param array $params
      * @param callable $callable
      * @return mixed
-     * @throws ContainerExceptionInterface
-     * @throws NotFoundExceptionInterface
      * @throws Throwable
      * @throws TransactionMethodException
-     * @throws TransactionTypeException
      */
-    public static function execServiceMethod(string $class, string $func, array $params, callable $callable)
+    public function execServiceMethod(string $class, string $func, array $params, callable $callable)
     {
-        $transactionType = rpc_context_get(Transaction::TRANSACTION_TYPE);
+        $this->setTransctionType(rpc_context_get(Transaction::TRANSACTION_TYPE));
 
-        if (empty($transactionType)) {
-            throw new TransactionTypeException($class . '::' . $func . ' TRANSACTION_TYPE is empty!');
-        }
-        if (!method_exists($class, $func . $transactionType)) {
+        if (!method_exists($class, $func . $this->transactionType)) {
             throw new TransactionMethodException($class . '::' . $func . ' Method is not found!');
         }
 
-        /** @var Transaction $transaction */
-        $transaction = Context::get(Transaction::TRANSACTION_OBJECT);
-        $uniData     = [
-            'transaction_id'   => $transaction->transactionId,
-            'transaction_type' => $transactionType,
-            'service_class'    => $class,
-            'service_fun'      => $func,
-            'service_params'   => json_encode($params),
+        $uniData = [
+            'transaction_id' => $this->transactionId,
+            'transaction_type' => $this->transactionType,
+            'service_class' => $class,
+            'service_func' => $func,
+            'service_params' => json_encode($params),
+            'service_req' => $this->transactionReq
         ];
+
+        TransactionModel::create(array_merge($uniData, ['status' => self::SERVICE_TRANSACTION_STATUS_WAIT]));
+
+        foreach ($this->getConnections() as $connection) {
+            Db::connection($connection)
+                ->beginTransaction();
+        }
+
         try {
-            TransactionModel::create(array_merge($uniData, ['status' => self::SERVICE_TRANSACTION_STATUS_WAIT]));
+            $result = call_user_func($callable, $func . $this->transactionType, $params);
 
-            $result = call_user_func($callable, $func . $transactionType, $params);
-
-            // 如果是头节点先确认Try过的服务
-            if ($transaction->isFirstNode()) {
-                $transaction->comfirmOrCancel(Transaction::TRANSACTION_TYPE_CONFIRM);
-            }
-
-            TransactionModel::where($uniData)
-                            ->update(
-                                [
-                                    'status'         => self::SERVICE_TRANSACTION_STATUS_SUCCESS,
-                                    'service_result' => json_encode($result)
-                                ]
-                            );
-
+            TransactionModel::where($uniData)->update([
+                'status' => self::SERVICE_TRANSACTION_STATUS_SUCCESS,
+                'service_result' => json_encode($result)
+            ]);
             return $result;
         } catch (Throwable $throwable) {
-            TransactionModel::where($uniData)
-                            ->update(['status' => self::SERVICE_TRANSACTION_STATUS_FAIL]);
-            // 本地事务Try期间发生的异常回滚
-            if ($transactionType == Transaction::TRANSACTION_TYPE_TRY) {
-                try {
-                    $transaction->comfirmOrCancel(Transaction::TRANSACTION_TYPE_CANCEL);
-                } catch (Throwable $throwable) {
-                    throw $throwable;
-                }
+            foreach ($this->getConnections() as $connection) {
+                Db::connection($connection)
+                    ->rollBack();
             }
 
+            TransactionModel::where($uniData)->update([
+                'status' => self::SERVICE_TRANSACTION_STATUS_FAIL,
+            ]);
             throw $throwable;
         }
     }
@@ -212,7 +208,7 @@ class Transaction
         if (rpc_context_get(self::TRANSACTION_ID)) {
             $this->transactionId = rpc_context_get(self::TRANSACTION_ID);
         } else {
-            $transactionId = microtime() . rand(100000000, 999999999);
+            $transactionId = microtime(true) . '-' . rand(100000000, 999999999);
             $transactionId .= '-' . getmypid();
             $transactionId .= '-' . Coroutine::getCid();
             $transactionId .= '-' . self::$transactionNo;
@@ -224,13 +220,24 @@ class Transaction
     }
 
     /**
+     * @param string|null $transactionType
      * @return $this
-     * @throws ContainerExceptionInterface
-     * @throws NotFoundExceptionInterface
      */
-    public function setIsFirstNode()
+    public function setIsFirstNode(?string $transactionType)
     {
-        $this->isFirstNode = rpc_context_get(self::TRANSACTION_TYPE) ? false : true;
+        if (true == Context::get(self::TRANSACTION_FIRST_NODE)) {
+            $this->isFirstNode = true;
+            return $this;
+        }
+
+        if (is_null($transactionType)) {
+            $this->isFirstNode = true;
+            Context::set(self::TRANSACTION_FIRST_NODE, true);
+            return $this;
+        }
+
+        $this->isFirstNode = false;
+
         return $this;
     }
 
@@ -243,32 +250,73 @@ class Transaction
     }
 
     /**
+     * @return int
+     */
+    public function getServiceIndex()
+    {
+        return $this->serviceIndex;
+    }
+
+    /**
      * @param string $transactionType
      * @return $this
      * @throws ContainerExceptionInterface
      * @throws NotFoundExceptionInterface
      */
-    public function setTransctionType(string $transactionType)
+    public function setTransctionType(?string $transactionType)
     {
-        rpc_context_set(self::TRANSACTION_TYPE, $transactionType);
+        if (is_null($transactionType)) {
+            $transactionType = self::TRANSACTION_TYPE_TRY;
+        }
+
         $this->transactionType = $transactionType;
+
+        rpc_context_set(self::TRANSACTION_TYPE, $transactionType);
+
         return $this;
     }
 
     /**
-     * @param string $class
-     * @param string $method
-     * @param array $params
+     * @param string|null $transactionParentReq
+     * @return $this
      */
-    public function addTryedService(string $class, string $method, array $params)
+    public function setTransactionParentReq(?string $transactionParentReq = null)
     {
-        array_push(
-            $this->serviceTryed,
-            make(TryedService::class)
-                ->setClass($class)
-                ->setMethod($method)
-                ->setParams($params)
-        );
+        if (!is_null($transactionParentReq)) {
+            $this->transactionParentReq = $transactionParentReq;
+        }
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getTransactionParentReq()
+    {
+        return $this->transactionParentReq;
+    }
+
+    /**
+     * @param int $serviceIndex
+     * @return $this
+     */
+    public function setTransactionReq(int $serviceIndex)
+    {
+        $transactionReq = ($this->transactionParentReq !== '' ? $this->transactionParentReq . '-' : '') . $serviceIndex;
+        // 当前请求号 -> 后面被调用服务的父级请求号
+        rpc_context_set(self::TRANSACTION_PARENT_REQ, $transactionReq);
+        $this->transactionReq = $transactionReq;
+
+        return $this;
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getTransactionReq()
+    {
+        return $this->transactionReq;
     }
 
     /**
@@ -289,25 +337,40 @@ class Transaction
     }
 
     /**
+     * @param string $class
+     * @param string $method
+     * @param array $params
+     */
+    public function addTryedService(string $class, string $method, array $params)
+    {
+        array_push(
+            $this->serviceTryed,
+            make(TryedService::class)
+                ->setClass($class)
+                ->setMethod($method)
+                ->setParams($params)
+        );
+
+        $this->setTransactionReq(++$this->serviceIndex);
+    }
+
+    /**
      * @param string $type
-     * @throws Throwable
      */
     public function comfirmOrCancel(string $type)
     {
-        foreach ($this->serviceTryed as $service) {
+        foreach ($this->serviceTryed as $index => $service) {
             try {
                 $injectService = $this->setTransctionType($type)
-                                      ->getService($service->getClass())
-                                      ->setTransaction($this);
+                    ->setTransactionReq($index)
+                    ->getService($service->getClass());
 
                 call_user_func_array([$injectService, $service->getMethod()], $service->getParams());
             } catch (Throwable $throwable) {
-                if ($type == self::TRANSACTION_TYPE_CONFIRM) {
-                    throw new TransactionCommitException($service->getClass() . '::' . $service->getMethod());
-                }
-
-                throw new TransactionCancelException($service->getClass() . '::' . $service->getMethod());
+                // Confirm or Cancel never throw exception.
             }
         }
+
+        $this->serviceTryed = [];
     }
 }

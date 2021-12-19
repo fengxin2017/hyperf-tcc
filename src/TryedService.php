@@ -77,6 +77,4 @@ class TryedService
 
         return $this;
     }
-
-
 }

@@ -33,21 +33,37 @@ class Tcc
             throw new Exception('Call to undefine method ' . $method);
         }
 
-        $transaction = make(Transaction::class)
-            ->setTransactionId()
-            ->setIsFirstNode()
+        $transaction = make(Transaction::class);
+        $transaction->setTransactionId()
+            ->setIsFirstNode(
+                rpc_context_get(Transaction::TRANSACTION_TYPE)
+            )
             ->setTransctionType(
-                rpc_context_get(Transaction::TRANSACTION_TYPE) ?: Transaction::TRANSACTION_TYPE_TRY
+                rpc_context_get(Transaction::TRANSACTION_TYPE)
+            )
+            ->setTransactionParentReq(
+                rpc_context_get(Transaction::TRANSACTION_PARENT_REQ)
+            )
+            ->setTransactionReq(
+                $transaction->getServiceIndex()
             );
 
         if ($method == 'connections') {
             $transaction->setConnections(...$params);
-            Context::set(Transaction::TRANSACTION_OBJECT, $transaction);
-            return $transaction;
+        } else {
+            $transaction->setConnections('default');
         }
 
-        $transaction->setConnections('default');
         Context::set(Transaction::TRANSACTION_OBJECT, $transaction);
+
         return $transaction->transaction(...$params);
+    }
+
+    /**
+     * @return Transaction|null
+     */
+    public static function getTransaction(): ?Transaction
+    {
+        return Context::get(Transaction::TRANSACTION_OBJECT);
     }
 }
