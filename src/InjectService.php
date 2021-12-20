@@ -67,6 +67,8 @@ class InjectService
 
     /**
      * @return mixed|string
+     * @throws ContainerExceptionInterface
+     * @throws NotFoundExceptionInterface
      */
     protected function rpcServiceClient()
     {
