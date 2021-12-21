@@ -28,18 +28,8 @@ class InjectService
      */
     public function __construct(Transaction $transation, string $serviceInterface)
     {
-        $this->transation = $transation;
+        $this->transation       = $transation;
         $this->serviceInterface = $serviceInterface;
-    }
-
-    /**
-     * @param Transaction $transation
-     * @return $this
-     */
-    public function setTransaction(Transaction $transation)
-    {
-        $this->transation = $transation;
-        return $this;
     }
 
     /**
@@ -53,13 +43,12 @@ class InjectService
     {
         $result = call_user_func_array([$this->rpcServiceClient(), $method], $params);
 
-        if (rpc_context_get(Transaction::TRANSACTION_TYPE) == Transaction::TRANSACTION_TYPE_TRY) {
-            $this->transation->addTryedService(
-                $this->serviceInterface,
-                $method,
-                $params,
-                );
-        }
+        // 执行成功添加到执行成功列表
+        $this->transation->addServiceExecSucceed(
+            $this->serviceInterface,
+            $method,
+            $params,
+            );
 
 
         return $result;
@@ -73,6 +62,6 @@ class InjectService
     protected function rpcServiceClient()
     {
         return ApplicationContext::getContainer()
-            ->get($this->serviceInterface);
+                                 ->get($this->serviceInterface);
     }
 }

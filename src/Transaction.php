@@ -8,7 +8,6 @@ use Fengxin2017\Tcc\Exception\TransactionMethodException;
 use Fengxin2017\Tcc\Model\TransactionModel;
 use Hyperf\DbConnection\Db;
 use Hyperf\Utils\Arr;
-use Hyperf\Utils\Context;
 use Psr\Container\ContainerExceptionInterface;
 use Psr\Container\NotFoundExceptionInterface;
 use Swoole\Coroutine;
@@ -28,15 +27,15 @@ class Transaction
 
     /**
      * 是否为头结点
-     * @var bool $isFirstNode
+     * @var $isFirstNode
      */
     protected $isFirstNode;
 
     /**
-     * Try成功的服务
-     * @var TryedService[] $serviceTryed
+     * 执行成功成功的服务
+     * @var ServiceExecSucceed[] $serviceExecSucceed
      */
-    protected $serviceTryed = [];
+    protected $serviceExecSucceedList = [];
 
     /**
      * 本地数据库连接
@@ -239,19 +238,15 @@ class Transaction
      */
     public function setIsFirstNode(?string $transactionType)
     {
-        if (!is_null(Context::get(self::TRANSACTION_FIRST_NODE))) {
-            return $this;
-        } else {
+        if (is_null($this->isFirstNode)) {
             if (is_null($transactionType)) {
                 $this->isFirstNode = true;
-                Context::set(self::TRANSACTION_FIRST_NODE, true);
             } else {
                 $this->isFirstNode = false;
-                Context::set(self::TRANSACTION_FIRST_NODE, false);
             }
-
-            return $this;
         }
+
+        return $this;
     }
 
     /**
@@ -320,7 +315,7 @@ class Transaction
     {
         $transactionReq = ($this->transactionParentReq !== '' ? $this->transactionParentReq . '-' : '') . $serviceIndex;
         // 当前请求号 -> 后面被调用服务的父级请求号
-        rpc_context_set(self::TRANSACTION_PARENT_REQ, $transactionReq);
+        rpc_context_set(self::TRANSACTION_REQ, $transactionReq);
         $this->transactionReq = $transactionReq;
 
         return $this;
@@ -337,9 +332,9 @@ class Transaction
     /**
      * @return array
      */
-    public function getTryedService()
+    public function getServiceExecSucceedList()
     {
-        return $this->serviceTryed;
+        return $this->serviceExecSucceedList;
     }
 
     /**
@@ -358,11 +353,11 @@ class Transaction
      * @throws ContainerExceptionInterface
      * @throws NotFoundExceptionInterface
      */
-    public function addTryedService(string $class, string $method, array $params)
+    public function addServiceExecSucceed(string $class, string $method, array $params)
     {
         array_push(
-            $this->serviceTryed,
-            make(TryedService::class)
+            $this->serviceExecSucceedList,
+            make(ServiceExecSucceed::class)
                 ->setClass($class)
                 ->setMethod($method)
                 ->setParams($params)
@@ -374,9 +369,9 @@ class Transaction
     /**
      * @param string $type
      */
-    public function comfirmOrCancel(string $type)
+    protected function comfirmOrCancel(string $type)
     {
-        foreach ($this->serviceTryed as $index => $service) {
+        foreach ($this->getServiceExecSucceedList() as $index => $service) {
             try {
                 $injectService = $this->setTransctionType($type)
                                       ->setTransactionReq($index)

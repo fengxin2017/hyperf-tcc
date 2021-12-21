@@ -4,7 +4,7 @@
 namespace Fengxin2017\Tcc;
 
 
-class TryedService
+class ServiceExecSucceed
 {
     /**
      * @var string $class
